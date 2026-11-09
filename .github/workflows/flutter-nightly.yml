@@ -1,9 +1,7 @@
 name: Flutter Nightly Build
 
 on:
-  schedule:
-    # schedule build every night
-    - cron: "0 0 * * *"
+  # Nightly schedule disabled on this fork; run manually if needed.
   workflow_dispatch:
 
 jobs:
