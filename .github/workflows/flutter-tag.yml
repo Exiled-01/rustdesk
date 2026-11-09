@@ -17,3 +17,5 @@ jobs:
       upload-artifact: true
       upload-tag: ${{ github.ref_name }}
       publish-update-metadata: ${{ github.repository == 'rustdesk/rustdesk' }}
+      # Personal fork: only Windows builds are needed.
+      windows-only: ${{ github.repository != 'rustdesk/rustdesk' }}
