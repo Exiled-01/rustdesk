@@ -2715,7 +2715,10 @@ impl VideoHandler {
                         } else {
                             self.fail_counter += 1;
                         }
-                        log::error!(
+                        // Can fire on every frame while a decoder is broken.
+                        hbb_common::throttled_log!(
+                            std::time::Duration::from_secs(5),
+                            error,
                             "Failed to handle video frame, fail counter: {}",
                             self.fail_counter
                         );

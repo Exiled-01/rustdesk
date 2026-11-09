@@ -120,12 +120,15 @@ impl Default for ImageTexture {
 
 #[inline]
 pub fn would_block_if_equal(old: &mut Vec<u8>, b: &[u8]) -> std::io::Result<()> {
-    // does this really help?
+    // Skipping identical frames saves an encode, which costs far more than this
+    // compare. The slice compare is a memcmp that exits at the first difference.
     if b == &old[..] {
         return Err(std::io::ErrorKind::WouldBlock.into());
     }
-    old.resize(b.len(), 0);
-    old.copy_from_slice(b);
+    // `clear` + `extend_from_slice` copies once. `resize` + `copy_from_slice`
+    // first zero-filled any growth and then wrote the same bytes again.
+    old.clear();
+    old.extend_from_slice(b);
     Ok(())
 }
 

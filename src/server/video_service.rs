@@ -30,14 +30,7 @@ use crate::{
     privacy_mode::{is_current_privacy_mode_impl, PRIVACY_MODE_IMPL_WIN_MAG},
     ui_interface::is_installed,
 };
-use hbb_common::{
-    anyhow::anyhow,
-    config,
-    tokio::sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-        Mutex as TokioMutex,
-    },
-};
+use hbb_common::{anyhow::anyhow, config};
 #[cfg(feature = "hwcodec")]
 use scrap::hwcodec::{HwRamEncoder, HwRamEncoderConfig};
 #[cfg(feature = "vram")]
@@ -119,8 +112,11 @@ impl DxgiRecoveryState {
     }
 }
 
-type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
-type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
+// A std channel is used (rather than tokio) because the only consumer is the
+// blocking video capture thread. Waiting with `recv_timeout` avoids building a
+// throwaway tokio runtime on every wait.
+type FrameFetchedNotifierSender = std::sync::mpsc::Sender<(i32, Option<Instant>)>;
+type FrameFetchedNotifierReceiver = Arc<Mutex<std::sync::mpsc::Receiver<(i32, Option<Instant>)>>>;
 
 lazy_static::lazy_static! {
     static ref FRAME_FETCHED_NOTIFIERS: Mutex<HashMap<usize, (FrameFetchedNotifierSender, FrameFetchedNotifierReceiver)>> = Mutex::new(HashMap::default());
@@ -203,13 +199,12 @@ impl VideoFrameController {
         }
     }
 
-    #[tokio::main(flavor = "current_thread")]
-    async fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
+    fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
         if self.send_conn_ids.is_empty() {
             return;
         }
 
-        let timeout_dur = Duration::from_millis(timeout_millis as u64);
+        let timeout_dur = Duration::from_millis(timeout_millis);
         let receiver = {
             match FRAME_FETCHED_NOTIFIERS
                 .lock()
@@ -222,29 +217,22 @@ impl VideoFrameController {
                 }
             }
         };
-        let mut receiver_guard = receiver.lock().await;
-        match tokio::time::timeout(timeout_dur, receiver_guard.recv()).await {
-            Err(_) => {
-                // break if timeout
-                // log::error!("blocking wait frame receiving timeout {}", timeout_millis);
+        let receiver_guard = receiver.lock().unwrap();
+        let mut on_fetched = |(id, instant): (i32, Option<Instant>)| {
+            if let Some(tm) = instant {
+                log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
             }
-            Ok(Some((id, instant))) => {
-                if let Some(tm) = instant {
-                    log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
-                }
-                fetched_conn_ids.insert(id);
-            }
-            Ok(None) => {
-                // this branch would never be reached
-            }
+            fetched_conn_ids.insert(id);
+        };
+        match receiver_guard.recv_timeout(timeout_dur) {
+            Ok(v) => on_fetched(v),
+            // Timeout: the caller loops until its overall deadline.
+            // Disconnected: never happens, the sender lives in a static map.
+            Err(_) => return,
         }
-        while !receiver_guard.is_empty() {
-            if let Some((id, instant)) = receiver_guard.recv().await {
-                if let Some(tm) = instant {
-                    log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
-                }
-                fetched_conn_ids.insert(id);
-            }
+        // Drain whatever else has already arrived.
+        while let Ok(v) = receiver_guard.try_recv() {
+            on_fetched(v);
         }
     }
 }
@@ -305,8 +293,8 @@ pub fn new(source: VideoSource, idx: usize) -> GenericService {
         .unwrap()
         .entry(idx)
         .or_insert_with(|| {
-            let (tx, rx) = unbounded_channel();
-            (tx, Arc::new(TokioMutex::new(rx)))
+            let (tx, rx) = std::sync::mpsc::channel();
+            (tx, Arc::new(Mutex::new(rx)))
         });
     let vs = VideoService {
         sp: GenericService::new(get_service_name(source, idx), true),
